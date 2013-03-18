@@ -46,4 +46,17 @@ See `flickrout --help` for supported commands.
     INFO: Set log level to INFO
     INFO: Verified!
 
-    $
+    $ flickrout photos backup/
+    INFO: Set log level to INFO
+    INFO: Saved all 349 photos!
+
+    $ ls backup/*.json | wc -l
+         349
+
+    $ ls backup/*.jpg | wc -l
+         346
+
+    $ ls backup/*.png | wc -l
+         3
+
+Due to Flickr API restrictions, "original" size photos can only be exported if you have a Pro account.

@@ -170,7 +170,6 @@ class Flickrout(Termtool):
         while page < pages:
             page += 1
             logging.debug("Fetching page %d of photos", page)
-            # TODO: if the user isn't Pro, we don't get an url_o. so grab the biggest possible?
             resp, content = client.flickr_request('flickr.people.getPhotos', user_id='me',
                 extras='description,license,date_upload,date_taken,original_format,last_update,geo,tags,machine_tags,o_dims,views,media,url_o', page=page)
             data = json.loads(content)
