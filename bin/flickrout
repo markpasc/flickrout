@@ -1,0 +1,151 @@
+#!/usr/bin/env python
+
+from functools import wraps
+import codecs
+import json
+import logging
+import os
+from os.path import join, isdir
+import time
+from urllib import urlencode, urlretrieve
+from urlparse import parse_qsl, urlunsplit
+import webbrowser
+
+import httplib2
+import oauth2 as oauth
+from termtool import Termtool, subcommand, argument
+
+
+def join_mkdir(*args):
+    dirpath = join(*args)
+    if not isdir(dirpath):
+        os.makedirs(dirpath)
+    return dirpath
+
+
+def authd(fn):
+    @wraps(fn)
+    def moo(self, args):
+        if not all((args.api_key, args.access_token)):
+            logging.error("Not configured to use Twitter API yet; try 'configure' command first")
+            sys.exit(1)
+
+        csr = oauth.Consumer(*args.api_key.split(':', 1))
+        token = oauth.Token(*args.access_token.split(':', 1))
+        client = oauth.Client(csr, token)
+        return fn(self, args, client)
+    return moo
+
+
+@argument('--api-key', help='Flickr application API key (in `token:secret` format)')
+@argument('--access-token', help='Flickr access token (in `token:secret` format)')
+class Flickrout(Termtool):
+
+    description = 'Export a Twitter.'
+
+    @subcommand(help='configures the API keys')
+    def configure(self, args):
+        if not args.api_key:
+            token = raw_input('API Key: ')
+            secret = raw_input('API Secret: ')
+            args.api_key = ':'.join((token, secret))
+
+        if not args.access_token:
+            csr = oauth.Consumer(*args.api_key.split(':', 1))
+            client = oauth.Client(csr)
+
+            http_url = 'http://www.flickr.com/services/oauth/request_token'
+            oauth_request = oauth.Request.from_consumer_and_token(csr, None,
+                http_method='GET', http_url=http_url)
+            oauth_request['oauth_callback'] = 'oob'
+            oauth_sign_method = oauth.SignatureMethod_HMAC_SHA1()
+            oauth_request.sign_request(oauth_sign_method, csr, None)
+            oauth_signing_base = oauth_sign_method.signing_base(oauth_request, csr, None)
+            signed_url = oauth_request.to_url()
+
+            h = httplib2.Http()
+            h.follow_redirects = 0
+            resp, content = h.request(signed_url)
+
+            if resp.status != 200:
+                raise ValueError('Unexpected response asking for Flickr request token: %d %s: %s' % (resp.status, resp.reason, content))
+
+            request_token_data = dict(parse_qsl(content))
+            request_token = oauth.Token(request_token_data['oauth_token'], request_token_data['oauth_token_secret'])
+
+            webbrowser.open('http://www.flickr.com/services/oauth/authorize?oauth_token=%s&perms=read' % (request_token.key,))
+            print
+            verifier = raw_input('Verifier: ')
+            print
+
+            http_url = 'http://www.flickr.com/services/oauth/access_token'
+            oauth_request = oauth.Request.from_consumer_and_token(csr, request_token,
+                http_method='GET', http_url=http_url, is_form_encoded=True)
+            oauth_request['oauth_verifier'] = verifier.strip()
+            oauth_sign_method = oauth.SignatureMethod_HMAC_SHA1()
+            oauth_request.sign_request(oauth_sign_method, csr, request_token)
+            oauth_signing_base = oauth_sign_method.signing_base(oauth_request, csr, request_token)
+            signed_url = oauth_request.to_url()
+
+            h = httplib2.Http()
+            h.follow_redirects = 0
+            resp, content = h.request(signed_url)
+
+            if resp.status != 200:
+                raise ValueError('Unexpected response asking for Flickr access token: %d %s: %s' % (resp.status, resp.reason, content))
+
+            access_token_data = dict(parse_qsl(content))
+            access_token = oauth.Token(access_token_data['oauth_token'], access_token_data['oauth_token_secret'])
+
+            # Make sure it works.
+            client = oauth.Client(csr, access_token)
+            resp, content = client.request('http://api.flickr.com/services/rest?format=json&nojsoncallback=1&method=flickr.test.login')
+            if resp.status != 200:
+                raise ValueError('Unexpected response verifying Flickr access token: %d %s: %s' % (resp.status, resp.reason, content))
+            verify_data = json.loads(content)
+            if verify_data['stat'] != 'ok':
+                raise ValueError('Error response verifying Flickr access token: %r', verify_data)
+
+            # Yay, it worked.
+            args.access_token = ':'.join((access_token.key, access_token.secret))
+
+        self.write_config_file(
+            '--api-key', args.api_key,
+            '--access-token', args.access_token,
+        )
+
+        print "Configured!"
+
+    @subcommand(help='verify that the saved authentication keys are good')
+    @authd
+    def verify(self, args, client):
+        resp, cont = client.request('http://api.flickr.com/services/rest?format=json&nojsoncallback=1&method=flickr.test.login')
+        if resp.status != 200:
+            logging.error("Unexpected HTTP response %d %s verifying authentication", resp.status, resp.reason)
+            return
+        content_type = resp.get('content-type')
+        if content_type is None:
+            logging.error("Response verifying authentication had no content type (is Flickr down?)")
+            return
+        if not content_type.startswith('application/json'):
+            logging.error("Unexpected response of type %r verifying authentication (expected application/json)", content_type)
+            return
+
+        verify_data = json.loads(cont)
+        if verify_data['stat'] != 'ok':
+            logging.error("Error response verifying authentication: %r", verify_data)
+            return
+
+        logging.info("Verified!")
+
+    def raise_for_response(self, resp, url, cont, expect=200):
+        if resp.status != expect:
+            logging.debug("ERROR RESPONSE: " + cont)
+            raise ValueError("Unexpected HTTP response %d %s making request %s" % (resp.status, resp.reason, url))
+        content_type = resp.get('content-type')
+        if not content_type or not content_type.startswith('application/json'):
+            raise ValueError("Unexpected content type '%s' for request %s" % (content_type, url))
+
+
+if __name__ == '__main__':
+    Flickrout().run()
