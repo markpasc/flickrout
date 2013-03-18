@@ -5,7 +5,7 @@ import codecs
 import json
 import logging
 import os
-from os.path import join, isdir
+from os.path import exists, isdir, join
 import time
 from urllib import urlencode, urlretrieve
 from urlparse import parse_qsl, urlunsplit
@@ -23,16 +23,28 @@ def join_mkdir(*args):
     return dirpath
 
 
+class FlickrClient(oauth.Client):
+
+    def flickr_request(self, method, **kwargs):
+        kwargs.update({
+            'format': 'json',
+            'nojsoncallback': 1,
+            'method': method,
+        })
+        url = 'http://api.flickr.com/services/rest?' + urlencode(kwargs)
+        return self.request(url)
+
+
 def authd(fn):
     @wraps(fn)
     def moo(self, args):
         if not all((args.api_key, args.access_token)):
-            logging.error("Not configured to use Twitter API yet; try 'configure' command first")
+            logging.error("Not configured to use Flickr API yet; try 'configure' command first")
             sys.exit(1)
 
         csr = oauth.Consumer(*args.api_key.split(':', 1))
         token = oauth.Token(*args.access_token.split(':', 1))
-        client = oauth.Client(csr, token)
+        client = FlickrClient(csr, token)
         return fn(self, args, client)
     return moo
 
@@ -41,7 +53,7 @@ def authd(fn):
 @argument('--access-token', help='Flickr access token (in `token:secret` format)')
 class Flickrout(Termtool):
 
-    description = 'Export a Twitter.'
+    description = 'Export a Flickr account.'
 
     @subcommand(help='configures the API keys')
     def configure(self, args):
@@ -119,7 +131,7 @@ class Flickrout(Termtool):
     @subcommand(help='verify that the saved authentication keys are good')
     @authd
     def verify(self, args, client):
-        resp, cont = client.request('http://api.flickr.com/services/rest?format=json&nojsoncallback=1&method=flickr.test.login')
+        resp, cont = client.flickr_request('flickr.test.login')
         if resp.status != 200:
             logging.error("Unexpected HTTP response %d %s verifying authentication", resp.status, resp.reason)
             return
@@ -145,6 +157,59 @@ class Flickrout(Termtool):
         content_type = resp.get('content-type')
         if not content_type or not content_type.startswith('application/json'):
             raise ValueError("Unexpected content type '%s' for request %s" % (content_type, url))
+
+    @subcommand(help="export a Flickr account's photos")
+    @argument('dir', help='directory to write photos to')
+    @authd
+    def photos(self, args, client):
+        # Go ahead and make the directory.
+        join_mkdir(args.dir)
+
+        page, pages = 0, 100
+        total_photos = 0
+        while page < pages:
+            page += 1
+            logging.debug("Fetching page %d of photos", page)
+            # TODO: if the user isn't Pro, we don't get an url_o. so grab the biggest possible?
+            resp, content = client.flickr_request('flickr.people.getPhotos', user_id='me',
+                extras='description,license,date_upload,date_taken,original_format,last_update,geo,tags,machine_tags,o_dims,views,media,url_o', page=page)
+            data = json.loads(content)
+
+            photos = data['photos']
+            page = photos['page']
+            pages = photos['pages']
+
+            for photo in photos['photo']:
+                local_filename = '.'.join((photo['id'], 'json'))
+                with open(join(args.dir, local_filename), 'w') as f:
+                    json.dump(photo, f, indent=4, sort_keys=True)
+
+                try:
+                    photo_url = photo['url_o']
+                except KeyError:
+                    logging.debug("No original size URL for photo %r %r, looking up sizes", photo['id'], photo['title'])
+                    resp, content = client.flickr_request('flickr.photos.getSizes', photo_id=photo['id'])
+                    size_data = json.loads(content)
+                    largest_size = max(size_data['sizes']['size'], key=lambda s: int(s['width']))
+                    logging.debug("Largest size for %r %r is %r", photo['id'], photo['title'], largest_size)
+
+                    photo_url = largest_size['source']
+                    local_filename = '.'.join((photo['id'], 'jpg'))
+                else:
+                    orig_filename = photo_url.rsplit('/', 1)[1]
+                    filename_parts = orig_filename.split('_', 2)
+                    local_filename = '_'.join((filename_parts[0], filename_parts[2]))
+
+                local_filepath = join(args.dir, local_filename)
+                # Don't bother redownloading it if it's already here, the photos don't change.
+                if not exists(local_filepath):
+                    urlretrieve(photo_url, local_filepath)
+
+            num_photos = len(photos['photo'])
+            logging.debug("Saved %d photos", num_photos)
+            total_photos += num_photos
+
+        logging.info("Saved all %d photos!", total_photos)
 
 
 if __name__ == '__main__':
