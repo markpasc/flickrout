@@ -1,11 +1,11 @@
 from setuptools import setup
 
 setup(
-    name='twitterout',
+    name='flickrout',
     version='1.0',
     packages=[],
     include_package_data=True,
-    scripts=['bin/twitterout'],
+    scripts=['bin/flickrout'],
 
     requires=['termtool', 'httplib2', 'oauth2', 'progressbar', 'PrettyTable'],
     install_requires=['termtool', 'httplib2', 'oauth2', 'progressbar', 'PrettyTable'],
